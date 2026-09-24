@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE servers SET version = ? WHERE key = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "1770bc22f048227e42fb57fa231903ea91b79a01429fd7aabed84e7bf548e2e0"
+}

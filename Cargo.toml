@@ -1,0 +1,64 @@
+[package]
+name = "cerberus"
+version = "0.1.0"
+edition = "2024"
+description = "Reliable watchdog and CLI for Space Station 14 game servers"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[features]
+default = ["daemon"]
+daemon = [
+    "dep:async-trait",
+    "dep:axum",
+    "dep:base64",
+    "dep:chrono",
+    "dep:futures-util",
+    "dep:hex",
+    "dep:nix",
+    "dep:sha2",
+    "dep:sqlx",
+    "dep:tempfile",
+    "dep:tokio-util",
+    "dep:tracing-loki",
+    "dep:tracing-subscriber",
+    "dep:zip",
+    "tokio/process",
+    "tokio/signal",
+    "tokio/sync",
+    "tokio/time",
+    "tokio/fs",
+]
+
+[dependencies]
+# Shared by both the daemon and the CLI.
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.13.5", features = ["json", "stream"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+toml = "1.1.6"
+tracing = "0.1.44"
+url = { version = "2.5.8", features = ["serde"] }
+
+# Daemon-only. `cargo build --no-default-features` skips these.
+async-trait = { version = "0.1.92", optional = true }
+axum = { version = "0.8", optional = true }
+base64 = { version = "0.23.1", optional = true }
+chrono = { version = "0.4.45", features = ["serde"], optional = true }
+futures-util = { version = "0.3.34", optional = true }
+hex = { version = "0.4.3", optional = true }
+nix = { version = "0.31.3", features = ["signal"], optional = true }
+sha2 = { version = "0.11.0", optional = true }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite"], optional = true }
+tempfile = { version = "3.27.0", optional = true }
+tokio-util = { version = "0.7.19", optional = true }
+tracing-loki = { version = "0.2.7", optional = true }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
+zip = { version = "8.6.0", optional = true }
+clap_complete = "4.6.11"

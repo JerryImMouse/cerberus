@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO servers (key, version) VALUES (?, ?) RETURNING *",
+  "describe": {
+    "columns": [
+      {
+        "name": "key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "servers",
+            "name": "key"
+          }
+        }
+      },
+      {
+        "name": "version",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "servers",
+            "name": "version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "6024514b62e1527122af2022e03bcb34a82cf5dee440350b9f76a9690f42e3b3"
+}

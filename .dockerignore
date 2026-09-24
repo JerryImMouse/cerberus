@@ -1,0 +1,6 @@
+target/
+db.sqlite*
+instances/
+.git/
+grafana/
+*.log

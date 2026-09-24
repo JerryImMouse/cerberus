@@ -1,0 +1,42 @@
+[database]
+file = "./db.sqlite"
+
+[admin]
+bind = "0.0.0.0:5000"
+token = "change-me-admin-token"
+
+[logging]
+level = "info"
+
+[logging.overrides]
+cerberus = "debug"
+
+[logging.console]
+enabled = true
+compact = true
+ansi = true
+
+[logging.loki]
+enabled = true
+endpoint = "http://loki:3100"
+labels = { service = "watchdog" }
+
+[servers]
+
+[servers.syndicate]
+name = "Syndicate Mothership"
+api.token = "Honk"
+api.port = 1212
+update.type = "manifest"
+update.manifest_url = "https://wizards.cdn.spacestation14.com/fork/wizards/manifest"
+
+heartbeat_timeout = 60      # seconds without a ping -> SIGKILL + backoff
+restart_min_secs = 1
+restart_max_secs = 60
+healthy_after_secs = 30     # stay up this long -> backoff resets
+
+# Optional overrides.
+# run_command = "bin/Robust.Server"
+# arguments = ["--cvar", "log.enabled=true"]
+# [servers.syndicate.environment]
+# DOTNET_gcServer = "1"

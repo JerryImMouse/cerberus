@@ -1,0 +1,16 @@
+global:
+  # Short interval keeps `last_ping_seconds` and `backoff_seconds` gauges
+  # useful for dashboards; cerberus's /metrics is cheap (a handful of
+  # SELECT COUNTs against SQLite) so this is fine.
+  scrape_interval: 10s
+  scrape_timeout: 5s
+
+scrape_configs:
+  - job_name: cerberus
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          # `cerberus` here is the docker-compose service name; the
+          # docker network resolves it. If you run cerberus outside the
+          # compose stack, replace with the host and port you exposed.
+          - "cerberus:5000"

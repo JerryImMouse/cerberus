@@ -1,0 +1,65 @@
+services:
+  cerberus:
+    build:
+      context: .
+      args:
+        DOTNET_TAG: 10.0-noble
+    image: cerberus:local
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+      - "1212:1212/tcp"
+      - "1212:1212/udp"
+    volumes:
+      - ./cerberus.toml:/app/cerberus.toml:ro
+      - cerberus-instances:/app/instances
+      - cerberus-db:/app/data
+    environment:
+      RUST_LOG: info
+    depends_on:
+      - loki
+    stop_grace_period: 45s
+
+  loki:
+    image: grafana/loki:3.5.0
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki-data:/loki
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - cerberus
+
+  grafana:
+    image: grafana/grafana:12.0.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - loki
+      - prometheus
+
+volumes:
+  loki-data:
+  grafana-data:
+  prometheus-data:
+  cerberus-instances:
+  cerberus-db:
