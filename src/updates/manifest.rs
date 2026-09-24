@@ -17,6 +17,7 @@ use url::Url;
 
 use super::UpdateProvider;
 use crate::{
+    config::ManifestAuth,
     updates::{UResult, UpdateError, utils::extract_build},
     utils,
 };
@@ -24,30 +25,38 @@ use crate::{
 #[derive(Debug)]
 pub struct ManifestUpdateProvider {
     manifest_url: Url,
+    auth: Option<ManifestAuth>,
     client: Client,
 }
 
 impl ManifestUpdateProvider {
-    pub fn new(manifest_url: Url) -> Self {
-        // No overall `timeout`: it would kill a slow-but-alive download of a big zip.
+    pub fn new(manifest_url: Url, auth: Option<ManifestAuth>) -> Self {
         let client = Client::builder()
-            .user_agent("ss14watchdog")
+            .user_agent("cerberus")
             .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_secs(30)) // max gap between chunks
+            .read_timeout(Duration::from_secs(30))
             .build()
             .expect("shouldn't happen");
         Self {
             manifest_url,
+            auth,
             client,
         }
+    }
+
+    fn get(&self, url: &str) -> reqwest::RequestBuilder {
+        let mut req = self.client.get(url);
+        if let Some(auth) = &self.auth {
+            req = req.basic_auth(&auth.username, Some(&auth.password));
+        }
+        req
     }
 
     pub async fn fetch_manifest(&self) -> UResult<ManifestInfo> {
         tracing::debug!(manifest_url = %self.manifest_url, "fetching build manifest");
         let res = self
-            .client
-            .get(self.manifest_url.to_string())
-            .timeout(Duration::from_secs(30)) // the manifest is small, so a whole-request cap is fine
+            .get(self.manifest_url.as_str())
+            .timeout(Duration::from_secs(30))
             .send()
             .await?;
         res.error_for_status_ref()?;
@@ -67,7 +76,7 @@ impl ManifestUpdateProvider {
         tracing::Span::current().record("rid", rid.as_str());
         let build = &info.server[&rid];
 
-        let res = self.client.get(build.url.to_string()).send().await?;
+        let res = self.get(build.url.as_str()).send().await?;
         res.error_for_status_ref()?;
         let total = res.content_length();
         tracing::info!(url = %build.url, total, "downloading server binary");

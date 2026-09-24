@@ -134,6 +134,14 @@ pub enum UpdateType {
 #[derive(Debug, Deserialize)]
 pub struct ManifestUpdateConfig {
     pub manifest_url: Url,
+    #[serde(default)]
+    pub authentication: Option<ManifestAuth>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ManifestAuth {
+    pub username: String,
+    pub password: String,
 }
 
 #[cfg(test)]

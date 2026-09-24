@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -18,11 +19,16 @@ pub struct Cli {
     #[arg(short, long, default_value = config::DEFAULT_PATH, global = true)]
     pub config: String,
 
+    // one-shot override of the endpoint (api+token). ignores CLI config.
     #[arg(long, global = true)]
     pub api: Option<String>,
 
     #[arg(long, global = true)]
     pub token: Option<String>,
+
+    // pick a named daemon from the CLI config
+    #[arg(short = 'd', long, global = true)]
+    pub daemon: Option<String>,
 
     #[arg(long, global = true)]
     pub cli_config: Option<PathBuf>,
@@ -36,22 +42,23 @@ pub enum Command {
     #[cfg(feature = "daemon")]
     Daemon,
     List,
-    Status { key: String },
-    Start { key: String },
-    Stop { key: String },
-    Restart { key: String },
-    ForceRestart { key: String },
-    Update { key: String },
+    Status { target: String },
+    Start { target: String },
+    Stop { target: String },
+    Restart { target: String },
+    ForceRestart { target: String },
+    Update { target: String },
+    // reload is a daemon-level op, not per-instance
     Reload,
-    Silence { key: String },
-    Unsilence { key: String },
+    Silence { target: String },
+    Unsilence { target: String },
     History {
-        key: String,
+        target: String,
         #[arg(short = 'n', long, default_value_t = 50)]
         limit: i64,
     },
     Logs {
-        key: String,
+        target: String,
         #[arg(short = 'f', long, default_value_t = true)]
         follow: bool,
     },
@@ -78,18 +85,26 @@ impl Cli {
             return Ok(());
         }
 
-        // Everything else is an HTTP client.
-        let client = self.resolve_client()?;
+        let ctx = self.resolve_daemons()?;
         match cmd {
             #[cfg(feature = "daemon")]
             Command::Daemon => unreachable!("handled above"),
-            Command::List => {
+            Command::Completions { .. } => unreachable!("handled above"),
+
+            Command::List => list_all(&ctx).await?,
+            Command::Reload => {
+                let (name, client) = ctx.pick_single()?;
                 let body: Value = client
-                    .request(reqwest::Method::GET, "/instances", None)
+                    .request(reqwest::Method::POST, "/reload", None)
                     .await?;
+                if ctx.has_multiple() {
+                    println!("[{name}]");
+                }
                 println!("{}", serde_json::to_string_pretty(&body)?);
             }
-            Command::Status { key } => {
+
+            Command::Status { target } => {
+                let (client, key) = ctx.resolve(&target)?;
                 let body: Value = client
                     .request(
                         reqwest::Method::GET,
@@ -99,17 +114,26 @@ impl Cli {
                     .await?;
                 println!("{}", serde_json::to_string_pretty(&body)?);
             }
-            Command::Start { key } => client.post_ok(&format!("/instances/{key}/start")).await?,
-            Command::Stop { key } => client.post_ok(&format!("/instances/{key}/stop")).await?,
-            Command::Restart { key } => {
+            Command::Start { target } => {
+                let (client, key) = ctx.resolve(&target)?;
+                client.post_ok(&format!("/instances/{key}/start")).await?
+            }
+            Command::Stop { target } => {
+                let (client, key) = ctx.resolve(&target)?;
+                client.post_ok(&format!("/instances/{key}/stop")).await?
+            }
+            Command::Restart { target } => {
+                let (client, key) = ctx.resolve(&target)?;
                 client.post_ok(&format!("/instances/{key}/restart")).await?
             }
-            Command::ForceRestart { key } => {
+            Command::ForceRestart { target } => {
+                let (client, key) = ctx.resolve(&target)?;
                 client
                     .post_ok(&format!("/instances/{key}/force-restart"))
                     .await?
             }
-            Command::Update { key } => {
+            Command::Update { target } => {
+                let (client, key) = ctx.resolve(&target)?;
                 let body: Value = client
                     .request(
                         reqwest::Method::POST,
@@ -119,69 +143,223 @@ impl Cli {
                     .await?;
                 print_update_outcome(&body);
             }
-            Command::Reload => {
-                let body: Value = client
-                    .request(reqwest::Method::POST, "/reload", None)
-                    .await?;
-                println!("{}", serde_json::to_string_pretty(&body)?);
-            }
-            Command::Silence { key } => {
+            Command::Silence { target } => {
+                let (client, key) = ctx.resolve(&target)?;
                 client.post_ok(&format!("/instances/{key}/silence")).await?
             }
-            Command::Unsilence { key } => {
+            Command::Unsilence { target } => {
+                let (client, key) = ctx.resolve(&target)?;
                 client
                     .post_ok(&format!("/instances/{key}/unsilence"))
                     .await?
             }
-            Command::History { key, limit } => {
+            Command::History { target, limit } => {
+                let (client, key) = ctx.resolve(&target)?;
                 let path = format!("/instances/{key}/history?limit={limit}");
                 let body: Value = client.request(reqwest::Method::GET, &path, None).await?;
                 print_history(&body);
             }
-            Command::Logs { key, follow: _ } => {
+            Command::Logs { target, follow: _ } => {
+                let (client, key) = ctx.resolve(&target)?;
                 client.stream_sse(&format!("/instances/{key}/logs")).await?;
-            }
-            Command::Completions { .. } => {
-                unreachable!("handled above the client-resolution step");
             }
         }
         Ok(())
     }
 
-    fn resolve_client(&self) -> Result<HttpClient, Box<dyn std::error::Error>> {
-        let user_cli = load_user_cli_config(self.cli_config.as_deref())?;
-        let daemon = load_daemon_config_lenient(&self.config);
+    fn resolve_daemons(&self) -> Result<DaemonCtx, Box<dyn std::error::Error>> {
+        // explicit --api/--token wins; everything else is one adhoc daemon
+        if let (Some(api), Some(token)) = (self.api.as_deref(), self.token.as_deref()) {
+            let mut daemons = BTreeMap::new();
+            daemons.insert(
+                "default".to_string(),
+                HttpClient::new(api.to_string(), token.to_string()),
+            );
+            return Ok(DaemonCtx {
+                daemons,
+                selected: Some("default".to_string()),
+                restricted: true,
+            });
+        }
 
-        let base = self
-            .api
-            .clone()
-            .or_else(|| user_cli.api.clone())
-            .or_else(|| {
-                daemon
-                    .as_ref()
-                    .map(|c| default_base_from_bind(&c.admin.bind))
-            })
-            .ok_or_else(|| {
-                "no admin URL; pass --api, or set `api = ...` in the CLI \
-                 config, or provide a daemon config with [admin].bind"
-                    .to_string()
-            })?;
-        let token = self
-            .token
-            .clone()
-            .or_else(|| user_cli.token.clone())
-            .or_else(|| daemon.as_ref().and_then(|c| c.admin.token.clone()))
-            .ok_or_else(|| {
-                "no admin token; pass --token, or set `token = ...` in the CLI \
-                 config, or set [admin].token in the daemon config"
-                    .to_string()
-            })?;
-        Ok(HttpClient {
-            base,
-            token,
-            client: reqwest::Client::new(),
+        let user_cli = load_user_cli_config(self.cli_config.as_deref())?;
+        let daemon_cfg = load_daemon_config_lenient(&self.config);
+
+        let mut daemons: BTreeMap<String, HttpClient> = BTreeMap::new();
+
+        // legacy top-level api/token becomes an implicit "default" entry
+        if let (Some(api), Some(token)) = (&user_cli.api, &user_cli.token) {
+            daemons.insert(
+                "default".to_string(),
+                HttpClient::new(api.clone(), token.clone()),
+            );
+        }
+        for (name, d) in &user_cli.daemons {
+            daemons.insert(name.clone(), HttpClient::new(d.api.clone(), d.token.clone()));
+        }
+
+        // last-resort fallback: local daemon config on disk. only if we have
+        // nothing else — a bare `cerberus list` on a host running a daemon
+        // Just Works without any CLI config.
+        if daemons.is_empty() {
+            if let Some(c) = &daemon_cfg {
+                if let Some(token) = c.admin.token.clone() {
+                    daemons.insert(
+                        "default".to_string(),
+                        HttpClient::new(default_base_from_bind(&c.admin.bind), token),
+                    );
+                }
+            }
+        }
+
+        if daemons.is_empty() {
+            return Err(
+                "no daemons configured; pass --api/--token, or set [daemons.<name>] \
+                 (or api/token) in ~/.config/cerberus/cli.toml"
+                    .into(),
+            );
+        }
+
+        // pick the "default" daemon for single-target commands with no prefix
+        let (selected, restricted) = if let Some(d) = &self.daemon {
+            if !daemons.contains_key(d) {
+                return Err(format!(
+                    "no daemon named {d:?}; known: {}",
+                    daemons.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+                .into());
+            }
+            (Some(d.clone()), true)
+        } else if let Some(d) = &user_cli.default {
+            if !daemons.contains_key(d) {
+                return Err(format!(
+                    "default = {d:?} in CLI config, but no such daemon defined"
+                )
+                .into());
+            }
+            (Some(d.clone()), false)
+        } else if daemons.len() == 1 {
+            (Some(daemons.keys().next().unwrap().clone()), true)
+        } else if daemons.contains_key("default") {
+            (Some("default".to_string()), false)
+        } else {
+            (None, false)
+        };
+
+        Ok(DaemonCtx {
+            daemons,
+            selected,
+            restricted,
         })
     }
+}
+
+struct DaemonCtx {
+    daemons: BTreeMap<String, HttpClient>,
+    // name of the daemon a bare `key` target resolves to; None when
+    // multiple daemons are configured and no default was picked, forcing
+    // the operator to write `daemon/key`
+    selected: Option<String>,
+    // set when --daemon or --api narrowed the scope to a single daemon;
+    // `list` then filters instead of aggregating across all configured ones
+    restricted: bool,
+}
+
+impl DaemonCtx {
+    fn has_multiple(&self) -> bool {
+        self.daemons.len() > 1
+    }
+
+    // for reload etc. — needs exactly one daemon
+    fn pick_single(&self) -> Result<(&str, &HttpClient), Box<dyn std::error::Error>> {
+        let name = self.selected.as_deref().ok_or_else(|| {
+            format!(
+                "multiple daemons configured ({}); pick one with --daemon <name> or set default = ...",
+                self.names_joined()
+            )
+        })?;
+        let client = self.daemons.get(name).expect("selected must exist");
+        Ok((name, client))
+    }
+
+    // target is either `daemon/key` or `key` (uses selected daemon)
+    fn resolve(&self, target: &str) -> Result<(&HttpClient, String), Box<dyn std::error::Error>> {
+        if let Some((d, k)) = target.split_once('/') {
+            let client = self.daemons.get(d).ok_or_else(|| {
+                format!("no daemon named {d:?}; known: {}", self.names_joined())
+            })?;
+            return Ok((client, k.to_string()));
+        }
+        let name = self.selected.as_deref().ok_or_else(|| {
+            format!(
+                "multiple daemons configured ({}); write target as `<daemon>/{target}` \
+                 or pass --daemon <name>",
+                self.names_joined()
+            )
+        })?;
+        let client = self.daemons.get(name).expect("selected must exist");
+        Ok((client, target.to_string()))
+    }
+
+    fn names_joined(&self) -> String {
+        self.daemons.keys().cloned().collect::<Vec<_>>().join(", ")
+    }
+}
+
+// hits every configured daemon in parallel, merges results, prefixes each
+// key with its daemon name so operators see `local/syndicate`, `prod/beta`
+async fn list_all(ctx: &DaemonCtx) -> Result<(), Box<dyn std::error::Error>> {
+    // when --daemon or --api narrowed the scope, only hit that one; otherwise
+    // aggregate across every configured daemon
+    let targets: Vec<(&String, &HttpClient)> = if ctx.restricted {
+        let name = ctx.selected.as_ref().expect("restricted implies selected");
+        vec![(name, ctx.daemons.get(name).expect("selected must exist"))]
+    } else {
+        ctx.daemons.iter().collect()
+    };
+
+    let mut tasks = Vec::new();
+    for (name, client) in &targets {
+        let name = (*name).clone();
+        let client = (*client).clone();
+        tasks.push(tokio::spawn(async move {
+            let res = client
+                .request(reqwest::Method::GET, "/instances", None)
+                .await
+                .map_err(|e| e.to_string());
+            (name, res)
+        }));
+    }
+
+    let mut merged: Vec<Value> = Vec::new();
+    let show_daemon = targets.len() > 1;
+    for t in tasks {
+        let (name, res) = t.await?;
+        match res {
+            Ok(Value::Array(rows)) => {
+                for mut row in rows {
+                    if show_daemon {
+                        if let Some(obj) = row.as_object_mut() {
+                            obj.insert("daemon".to_string(), Value::String(name.clone()));
+                            if let Some(Value::String(k)) = obj.get("key").cloned() {
+                                obj.insert("key".to_string(), Value::String(format!("{name}/{k}")));
+                            }
+                        }
+                    }
+                    merged.push(row);
+                }
+            }
+            Ok(other) => {
+                eprintln!("[{name}] unexpected response shape: {other}");
+            }
+            Err(e) => {
+                eprintln!("[{name}] {e}");
+            }
+        }
+    }
+
+    println!("{}", serde_json::to_string_pretty(&Value::Array(merged))?);
+    Ok(())
 }
 
 fn print_update_outcome(v: &Value) {
@@ -276,8 +454,19 @@ fn default_base_from_bind(bind: &str) -> String {
 
 #[derive(Deserialize, Default, Debug)]
 struct UserCliConfig {
+    // legacy: single-daemon fields; treated as an implicit "default"
     api: Option<String>,
     token: Option<String>,
+    // which named daemon to use when a target has no prefix
+    default: Option<String>,
+    #[serde(default)]
+    daemons: std::collections::HashMap<String, DaemonEntry>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct DaemonEntry {
+    api: String,
+    token: String,
 }
 
 fn load_user_cli_config(
@@ -311,6 +500,7 @@ fn load_daemon_config_lenient(path: &str) -> Option<config::SharedWatchdogConfig
     config::from_file(path).ok()
 }
 
+#[derive(Clone)]
 struct HttpClient {
     base: String,
     token: String,
@@ -318,6 +508,14 @@ struct HttpClient {
 }
 
 impl HttpClient {
+    fn new(base: String, token: String) -> Self {
+        Self {
+            base,
+            token,
+            client: reqwest::Client::new(),
+        }
+    }
+
     async fn request(
         &self,
         method: reqwest::Method,

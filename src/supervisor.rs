@@ -132,7 +132,10 @@ impl Inner {
 
 fn build_updater(server: &ServerConfig) -> Arc<dyn UpdateProvider> {
     match &server.update.update_type {
-        UpdateType::Manifest(m) => Arc::new(ManifestUpdateProvider::new(m.manifest_url.clone())),
+        UpdateType::Manifest(m) => Arc::new(ManifestUpdateProvider::new(
+            m.manifest_url.clone(),
+            m.authentication.clone(),
+        )),
     }
 }
 
@@ -1070,6 +1073,7 @@ fn clone_server_cfg(s: &ServerConfig) -> ServerConfig {
             update_type: match &s.update.update_type {
                 UpdateType::Manifest(m) => UpdateType::Manifest(ManifestUpdateConfig {
                     manifest_url: m.manifest_url.clone(),
+                    authentication: m.authentication.clone(),
                 }),
             },
         },
