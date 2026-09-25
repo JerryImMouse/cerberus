@@ -42,16 +42,32 @@ pub enum Command {
     #[cfg(feature = "daemon")]
     Daemon,
     List,
-    Status { target: String },
-    Start { target: String },
-    Stop { target: String },
-    Restart { target: String },
-    ForceRestart { target: String },
-    Update { target: String },
+    Status {
+        target: String,
+    },
+    Start {
+        target: String,
+    },
+    Stop {
+        target: String,
+    },
+    Restart {
+        target: String,
+    },
+    ForceRestart {
+        target: String,
+    },
+    Update {
+        target: String,
+    },
     // reload is a daemon-level op, not per-instance
     Reload,
-    Silence { target: String },
-    Unsilence { target: String },
+    Silence {
+        target: String,
+    },
+    Unsilence {
+        target: String,
+    },
     History {
         target: String,
         #[arg(short = 'n', long, default_value_t = 50)]
@@ -195,21 +211,23 @@ impl Cli {
             );
         }
         for (name, d) in &user_cli.daemons {
-            daemons.insert(name.clone(), HttpClient::new(d.api.clone(), d.token.clone()));
+            daemons.insert(
+                name.clone(),
+                HttpClient::new(d.api.clone(), d.token.clone()),
+            );
         }
 
         // last-resort fallback: local daemon config on disk. only if we have
         // nothing else — a bare `cerberus list` on a host running a daemon
         // Just Works without any CLI config.
-        if daemons.is_empty() {
-            if let Some(c) = &daemon_cfg {
-                if let Some(token) = c.admin.token.clone() {
-                    daemons.insert(
-                        "default".to_string(),
-                        HttpClient::new(default_base_from_bind(&c.admin.bind), token),
-                    );
-                }
-            }
+        if daemons.is_empty()
+            && let Some(c) = &daemon_cfg
+            && let Some(token) = c.admin.token.clone()
+        {
+            daemons.insert(
+                "default".to_string(),
+                HttpClient::new(default_base_from_bind(&c.admin.bind), token),
+            );
         }
 
         if daemons.is_empty() {
@@ -232,10 +250,9 @@ impl Cli {
             (Some(d.clone()), true)
         } else if let Some(d) = &user_cli.default {
             if !daemons.contains_key(d) {
-                return Err(format!(
-                    "default = {d:?} in CLI config, but no such daemon defined"
-                )
-                .into());
+                return Err(
+                    format!("default = {d:?} in CLI config, but no such daemon defined").into(),
+                );
             }
             (Some(d.clone()), false)
         } else if daemons.len() == 1 {
@@ -285,9 +302,10 @@ impl DaemonCtx {
     // target is either `daemon/key` or `key` (uses selected daemon)
     fn resolve(&self, target: &str) -> Result<(&HttpClient, String), Box<dyn std::error::Error>> {
         if let Some((d, k)) = target.split_once('/') {
-            let client = self.daemons.get(d).ok_or_else(|| {
-                format!("no daemon named {d:?}; known: {}", self.names_joined())
-            })?;
+            let client = self
+                .daemons
+                .get(d)
+                .ok_or_else(|| format!("no daemon named {d:?}; known: {}", self.names_joined()))?;
             return Ok((client, k.to_string()));
         }
         let name = self.selected.as_deref().ok_or_else(|| {
@@ -338,12 +356,10 @@ async fn list_all(ctx: &DaemonCtx) -> Result<(), Box<dyn std::error::Error>> {
         match res {
             Ok(Value::Array(rows)) => {
                 for mut row in rows {
-                    if show_daemon {
-                        if let Some(obj) = row.as_object_mut() {
-                            obj.insert("daemon".to_string(), Value::String(name.clone()));
-                            if let Some(Value::String(k)) = obj.get("key").cloned() {
-                                obj.insert("key".to_string(), Value::String(format!("{name}/{k}")));
-                            }
+                    if show_daemon && let Some(obj) = row.as_object_mut() {
+                        obj.insert("daemon".to_string(), Value::String(name.clone()));
+                        if let Some(Value::String(k)) = obj.get("key").cloned() {
+                            obj.insert("key".to_string(), Value::String(format!("{name}/{k}")));
                         }
                     }
                     merged.push(row);

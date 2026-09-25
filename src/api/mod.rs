@@ -33,13 +33,21 @@ pub fn router(state: AppState) -> Router {
             "/instances/{key}/force-restart",
             post(force_restart_instance),
         )
-        .route("/instances/{key}/update", post(update_instance))
         .route("/instances/{key}/silence", post(silence_instance))
         .route("/instances/{key}/unsilence", post(unsilence_instance))
         .route("/instances/{key}/history", get(instance_history))
         .route("/instances/{key}/logs", get(instance_logs))
         .route("/reload", post(reload_config))
         .layer(middleware::from_fn_with_state(state.clone(), require_admin));
+
+    // update accepts either admin bearer (from the CLI) or basic key:apiToken
+    // (from Robust.Cdn's NotifyWatchdogUpdateJob). Same handler either way.
+    let update = Router::new()
+        .route("/instances/{key}/update", post(update_instance))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_admin_or_instance_basic,
+        ));
 
     let game = Router::new()
         .route("/server_api/{key}/ping", post(ping_instance))
@@ -52,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .merge(admin)
+        .merge(update)
         .merge(game)
         .with_state(state)
 }
@@ -279,6 +288,58 @@ fn extract_server_api_key(path: &str) -> Option<String> {
     let rest = path.strip_prefix("/server_api/")?;
     let end = rest.find('/').unwrap_or(rest.len());
     Some(rest[..end].to_string())
+}
+
+fn extract_instance_key(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/instances/")?;
+    let end = rest.find('/').unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
+
+// try admin bearer first; on fail fall back to basic key:apiToken.
+// used by /instances/{key}/update so both the CLI and Robust.Cdn's
+// NotifyWatchdogUpdateJob can hit the same handler.
+async fn require_admin_or_instance_basic(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    req: Request,
+    next: Next,
+) -> Response {
+    let raw = headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if let Some(presented) = raw.strip_prefix("Bearer ") {
+        if let Some(expected) = state.admin_token.as_deref()
+            && constant_time_eq(presented.as_bytes(), expected.as_bytes())
+        {
+            return next.run(req).await;
+        }
+        return (StatusCode::UNAUTHORIZED, "bad admin token").into_response();
+    }
+
+    if raw.starts_with("Basic ") {
+        let path = req.uri().path().to_owned();
+        let Some(url_key) = extract_instance_key(&path) else {
+            return (StatusCode::BAD_REQUEST, "no instance key").into_response();
+        };
+        let Some((user, pass)) = parse_basic(raw) else {
+            return unauthorized_basic();
+        };
+        if user != url_key {
+            return (StatusCode::FORBIDDEN, "key mismatch").into_response();
+        }
+        let Some(sup) = state.watchdog.get(&url_key) else {
+            return (StatusCode::NOT_FOUND, "unknown instance").into_response();
+        };
+        if !constant_time_eq(pass.as_bytes(), sup.api_token().as_bytes()) {
+            return unauthorized_basic();
+        }
+        return next.run(req).await;
+    }
+
+    (StatusCode::UNAUTHORIZED, "missing auth").into_response()
 }
 
 fn parse_basic(header: &str) -> Option<(String, String)> {
