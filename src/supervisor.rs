@@ -461,13 +461,15 @@ async fn apply_command_while_stopped(inner: &Arc<Inner>, cmd: Command) -> Option
     match cmd {
         Command::Stop(rtx) => {
             record_admin(inner, "stop").await;
+            set_state(inner, InternalState::Stopped).await;
             let _ = rtx.send(());
-            None
+            Some(Desired::Stopped)
         }
         Command::Kill(rtx) => {
             record_admin(inner, "kill").await;
+            set_state(inner, InternalState::Stopped).await;
             let _ = rtx.send(());
-            None
+            Some(Desired::Stopped)
         }
         Command::Restart(rtx) => {
             record_admin(inner, "restart").await;
@@ -707,6 +709,7 @@ async fn run_once(inner: &Arc<Inner>, rx: &mut mpsc::Receiver<Command>) -> RunOu
                         record_admin(inner, "stop").await;
                         set_state(inner, InternalState::Stopping).await;
                         graceful_or_kill(inner, &mut wait, &kill, "Stop requested by operator").await;
+                        set_state(inner, InternalState::Stopped).await;
                         let _ = rtx.send(());
                         return RunOutcome::StoppedByCommand;
                     }
@@ -715,6 +718,7 @@ async fn run_once(inner: &Arc<Inner>, rx: &mut mpsc::Receiver<Command>) -> RunOu
                         set_state(inner, InternalState::Stopping).await;
                         kill.cancel();
                         let _ = (&mut wait).await;
+                        set_state(inner, InternalState::Stopped).await;
                         let _ = rtx.send(());
                         return RunOutcome::StoppedByCommand;
                     }
