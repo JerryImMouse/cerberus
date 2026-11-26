@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::SharedWatchdogConfig,
-    supervisor::{Status, Watchdog},
+    supervisor::{Status, SupervisorError, Watchdog},
 };
 
 #[derive(Clone)]
@@ -29,6 +29,14 @@ pub fn router(state: AppState) -> Router {
         .route("/instances/{key}/start", post(start_instance))
         .route("/instances/{key}/stop", post(stop_instance))
         .route("/instances/{key}/restart", post(restart_instance))
+        .route(
+            "/instances/{key}/restart-at-round-end",
+            post(restart_at_round_end_instance),
+        )
+        .route(
+            "/instances/{key}/cancel-restart",
+            post(cancel_restart_instance),
+        )
         .route(
             "/instances/{key}/force-restart",
             post(force_restart_instance),
@@ -413,7 +421,7 @@ async fn start_instance(
         .watchdog
         .get(&key)
         .ok_or_else(not_found)?
-        .restart()
+        .restart(None)
         .await
         .map_err(sup_err)?;
     Ok(StatusCode::NO_CONTENT)
@@ -433,17 +441,55 @@ async fn stop_instance(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(serde::Deserialize)]
+struct RestartRequest {
+    reason: Option<String>,
+}
+
 async fn restart_instance(
     State(state): State<AppState>,
     Path(key): Path<String>,
+    body: Option<Json<RestartRequest>>,
 ) -> Result<StatusCode, Response> {
     state
         .watchdog
         .get(&key)
         .ok_or_else(not_found)?
-        .restart()
+        .restart(body.and_then(|Json(b)| b.reason))
         .await
         .map_err(sup_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn restart_at_round_end_instance(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    body: Option<Json<RestartRequest>>,
+) -> Result<StatusCode, Response> {
+    state
+        .watchdog
+        .get(&key)
+        .ok_or_else(not_found)?
+        .restart_at_round_end(body.and_then(|Json(b)| b.reason))
+        .await
+        .map_err(sup_err)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn cancel_restart_instance(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<StatusCode, Response> {
+    let cancelled = state
+        .watchdog
+        .get(&key)
+        .ok_or_else(not_found)?
+        .cancel_restart()
+        .await
+        .map_err(sup_err)?;
+    if !cancelled {
+        return Err((StatusCode::CONFLICT, "no restart pending").into_response());
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -572,6 +618,10 @@ fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "unknown instance").into_response()
 }
 
-fn sup_err(e: crate::supervisor::SupervisorError) -> Response {
-    (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
+fn sup_err(e: SupervisorError) -> Response {
+    let status = match e {
+        SupervisorError::TaskGone => StatusCode::SERVICE_UNAVAILABLE,
+        SupervisorError::NoApiPort => StatusCode::CONFLICT,
+    };
+    (status, e.to_string()).into_response()
 }
