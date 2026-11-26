@@ -38,5 +38,6 @@ healthy_after_secs = 30     # stay up this long -> backoff resets
 # Optional overrides.
 # run_command = "bin/Robust.Server"
 # arguments = ["--cvar", "log.enabled=true"]
+# cpus = "0-2,16-18"        # pin to these CPUs from the first instruction (Linux only)
 # [servers.syndicate.environment]
 # DOTNET_gcServer = "1"

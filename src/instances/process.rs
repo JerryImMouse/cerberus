@@ -52,7 +52,8 @@ impl InstanceProvider for ProcessInstanceProvider {
         };
         make_executable(&program).await?;
 
-        let mut child = Command::new(&program)
+        let mut command = Command::new(&program);
+        command
             .args(&spec.args)
             .envs(&spec.env)
             .current_dir(&cwd)
@@ -60,8 +61,11 @@ impl InstanceProvider for ProcessInstanceProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // don't orphan servers if the supervisor task drops without stopping.
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        if let Some(cpus) = &spec.cpus {
+            pin_to_cpus(&spec.id, &mut command, cpus)?;
+        }
+        let mut child = command.spawn()?;
 
         let pid = child.id().unwrap_or_default();
         let id = spec.id.clone();
@@ -122,6 +126,29 @@ impl InstanceProvider for ProcessInstanceProvider {
             kill,
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+fn pin_to_cpus(_id: &str, command: &mut Command, cpus: &[usize]) -> io::Result<()> {
+    use nix::{
+        sched::{CpuSet, sched_setaffinity},
+        unistd::Pid,
+    };
+    let mut set = CpuSet::new();
+    for &cpu in cpus {
+        set.set(cpu)?;
+    }
+    // in the child before exec, so .NET sizes its GC heaps and thread pool for this set
+    unsafe {
+        command.pre_exec(move || Ok(sched_setaffinity(Pid::from_raw(0), &set)?));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pin_to_cpus(id: &str, _command: &mut Command, _cpus: &[usize]) -> io::Result<()> {
+    tracing::warn!(instance = %id, "cpus is only supported on linux; ignoring");
+    Ok(())
 }
 
 async fn terminate(
@@ -190,4 +217,29 @@ async fn make_executable(path: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 async fn make_executable(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod test {
+    use super::*;
+    use nix::{
+        sched::{CpuSet, sched_getaffinity},
+        unistd::Pid,
+    };
+
+    #[tokio::test]
+    async fn child_starts_pinned() {
+        let allowed = sched_getaffinity(Pid::from_raw(0)).unwrap();
+        let cpu = (0..CpuSet::count())
+            .find(|&c| allowed.is_set(c).unwrap())
+            .unwrap();
+        let mut command = Command::new("sh");
+        command.args(["-c", "grep Cpus_allowed_list /proc/self/status"]);
+        pin_to_cpus("test", &mut command, &[cpu]).unwrap();
+        let out = command.output().await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!("Cpus_allowed_list:\t{cpu}")
+        );
+    }
 }

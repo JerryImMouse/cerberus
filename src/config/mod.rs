@@ -97,6 +97,9 @@ pub struct ServerConfig {
     #[serde(default)]
     pub environment: HashMap<String, String>,
 
+    #[serde(default, deserialize_with = "deserialize_cpus")]
+    pub cpus: Option<Vec<usize>>,
+
     #[serde(default = "default_heartbeat_timeout")]
     pub heartbeat_timeout: u64,
 
@@ -110,6 +113,40 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub silent: bool,
+}
+
+// CPU_SETSIZE in glibc and musl
+const MAX_CPUS: usize = 1024;
+
+fn deserialize_cpus<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<usize>>, D::Error> {
+    let raw = String::deserialize(d)?;
+    parse_cpu_list(&raw)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+fn parse_cpu_list(raw: &str) -> Result<Vec<usize>, String> {
+    let mut cpus = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        let (lo, hi) = part.split_once('-').unwrap_or((part, part));
+        let parse = |s: &str| {
+            s.trim()
+                .parse::<usize>()
+                .map_err(|_| format!("bad cpu list {raw:?}: {part:?} is not a cpu or a range"))
+        };
+        let (lo, hi) = (parse(lo)?, parse(hi)?);
+        if lo > hi {
+            return Err(format!("bad cpu list {raw:?}: range {part:?} is reversed"));
+        }
+        if hi >= MAX_CPUS {
+            return Err(format!("bad cpu list {raw:?}: cpu {hi} is out of range"));
+        }
+        cpus.extend(lo..=hi);
+    }
+    Ok(cpus)
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,5 +189,41 @@ mod test {
     #[test]
     fn config_deserializable() {
         toml::from_str::<WatchdogConfig>(CONFIG_SAMPLE).unwrap();
+    }
+
+    #[test]
+    fn cpu_list_parses_ranges_and_singles() {
+        assert_eq!(parse_cpu_list("0-2,16-18").unwrap(), [0, 1, 2, 16, 17, 18]);
+        assert_eq!(parse_cpu_list("3").unwrap(), [3]);
+        assert_eq!(parse_cpu_list(" 1 , 4-5 ").unwrap(), [1, 4, 5]);
+    }
+
+    #[test]
+    fn cpu_list_rejects_garbage() {
+        for raw in ["", "1,", "a", "1-", "-1", "3-1", "0-2,x", "1024", "1-2-3"] {
+            assert!(parse_cpu_list(raw).is_err(), "{raw:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn cpus_is_optional() {
+        assert_eq!(server_with("").unwrap().cpus, None);
+        assert_eq!(
+            server_with("cpus = \"0-1,8\"").unwrap().cpus,
+            Some(vec![0, 1, 8])
+        );
+    }
+
+    #[test]
+    fn bad_cpus_fails_config_load() {
+        let err = server_with("cpus = \"4-2\"").unwrap_err();
+        assert!(err.to_string().contains("reversed"), "{err}");
+    }
+
+    fn server_with(extra: &str) -> Result<ServerConfig, toml::de::Error> {
+        toml::from_str(&format!(
+            "name = \"x\"\napi.token = \"t\"\nupdate.type = \"manifest\"\n\
+             update.manifest_url = \"https://example.com/manifest\"\n{extra}"
+        ))
     }
 }

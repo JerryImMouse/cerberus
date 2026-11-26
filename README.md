@@ -72,6 +72,15 @@ username = "myuser"
 password = "mypass"
 ```
 
+To pin a server to some CPUs (Linux only):
+
+```toml
+[servers.mymain]
+cpus = "0-2,16-18"
+```
+
+The affinity is set in the child before exec, so the .NET runtime sees only those CPUs when it sizes its GC heaps and thread pool, and `DOTNET_PROCESSOR_COUNT` is not needed. The CPUs must be inside the container's cpuset. A malformed list fails config load and `reload`. On other platforms the option is ignored with a warning.
+
 Per-server knobs you'll probably want at some point:
 
 ```toml

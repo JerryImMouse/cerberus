@@ -885,6 +885,7 @@ fn build_spec(inner: &Arc<Inner>, version: &str) -> InstanceSpec {
         program,
         args,
         env,
+        cpus: cfg.cpus.clone(),
     }
 }
 
@@ -1080,6 +1081,7 @@ fn clone_server_cfg(s: &ServerConfig) -> ServerConfig {
         run_command: s.run_command.clone(),
         arguments: s.arguments.clone(),
         environment: s.environment.clone(),
+        cpus: s.cpus.clone(),
         heartbeat_timeout: s.heartbeat_timeout,
         restart_min_secs: s.restart_min_secs,
         restart_max_secs: s.restart_max_secs,
