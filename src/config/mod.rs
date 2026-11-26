@@ -207,6 +207,7 @@ mod test {
         assert!(!server_with("autostart = false").unwrap().autostart);
     }
 
+    #[test]
     fn cpu_list_parses_ranges_and_singles() {
         assert_eq!(parse_cpu_list("0-2,16-18").unwrap(), [0, 1, 2, 16, 17, 18]);
         assert_eq!(parse_cpu_list("3").unwrap(), [3]);
