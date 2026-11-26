@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::{
     sync::{Mutex, broadcast, mpsc, oneshot},
@@ -50,6 +50,7 @@ pub enum Status {
         version: String,
         uptime_secs: u64,
         last_ping_secs_ago: Option<u64>,
+        restart_at_round_end: Option<String>,
     },
     Backoff {
         wait_secs: u64,
@@ -65,7 +66,10 @@ pub enum Status {
 enum Command {
     Stop(oneshot::Sender<()>),
     Kill(oneshot::Sender<()>),
-    Restart(oneshot::Sender<()>),
+    Restart(String, oneshot::Sender<()>),
+    // shuts down with the reason once the server is back in the lobby or empty
+    RestartAtRoundEnd(String, oneshot::Sender<()>),
+    CancelRestart(oneshot::Sender<bool>),
     ForceRestart(oneshot::Sender<()>),
     // never disturbs a running server, see handle_update_running
     Update(oneshot::Sender<UpdateOutcome>),
@@ -105,6 +109,7 @@ enum InternalState {
         pid: u32,
         started_at: Instant,
         version: String,
+        restart_at_round_end: Option<String>,
     },
     Backoff {
         until: Instant,
@@ -138,6 +143,8 @@ fn build_updater(server: &ServerConfig) -> Arc<dyn UpdateProvider> {
         )),
     }
 }
+
+const RESTART_REASON: &str = "Restart requested by operator";
 
 impl Supervisor {
     pub fn spawn(
@@ -247,8 +254,28 @@ impl Supervisor {
     pub async fn kill(&self) -> Result<(), SupervisorError> {
         self.send(Command::Kill).await
     }
-    pub async fn restart(&self) -> Result<(), SupervisorError> {
-        self.send(Command::Restart).await
+    pub async fn restart(&self, reason: Option<String>) -> Result<(), SupervisorError> {
+        let reason = reason.unwrap_or_else(|| RESTART_REASON.to_string());
+        self.send(|rtx| Command::Restart(reason, rtx)).await
+    }
+    pub async fn restart_at_round_end(
+        &self,
+        reason: Option<String>,
+    ) -> Result<(), SupervisorError> {
+        if self.inner.server().api.port.is_none() {
+            return Err(SupervisorError::NoApiPort);
+        }
+        let reason = reason.unwrap_or_else(|| RESTART_REASON.to_string());
+        self.send(|rtx| Command::RestartAtRoundEnd(reason, rtx))
+            .await
+    }
+    pub async fn cancel_restart(&self) -> Result<bool, SupervisorError> {
+        let (rtx, rrx) = oneshot::channel();
+        self.tx
+            .send(Command::CancelRestart(rtx))
+            .await
+            .map_err(|_| SupervisorError::TaskGone)?;
+        rrx.await.map_err(|_| SupervisorError::TaskGone)
     }
     pub async fn force_restart(&self) -> Result<(), SupervisorError> {
         self.send(Command::ForceRestart).await
@@ -288,11 +315,13 @@ fn snapshot(s: &InternalState, last_ping: Option<Instant>) -> Status {
             pid,
             started_at,
             version,
+            restart_at_round_end,
         } => Status::Running {
             pid: *pid,
             version: version.clone(),
             uptime_secs: started_at.elapsed().as_secs(),
             last_ping_secs_ago: last_ping.map(|t| t.elapsed().as_secs()),
+            restart_at_round_end: restart_at_round_end.clone(),
         },
         InternalState::Backoff { until, failures } => Status::Backoff {
             wait_secs: until.saturating_duration_since(Instant::now()).as_secs(),
@@ -310,6 +339,8 @@ fn snapshot(s: &InternalState, last_ping: Option<Instant>) -> Status {
 pub enum SupervisorError {
     #[error("supervisor task is not running")]
     TaskGone,
+    #[error("api.port is not set, so the round cannot be watched")]
+    NoApiPort,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -465,18 +496,29 @@ async fn apply_command_while_stopped(inner: &Arc<Inner>, cmd: Command) -> Option
     match cmd {
         Command::Stop(rtx) => {
             record_admin(inner, "stop").await;
+            set_state(inner, InternalState::Stopped).await;
             let _ = rtx.send(());
-            None
+            Some(Desired::Stopped)
         }
         Command::Kill(rtx) => {
             record_admin(inner, "kill").await;
+            set_state(inner, InternalState::Stopped).await;
             let _ = rtx.send(());
-            None
+            Some(Desired::Stopped)
         }
-        Command::Restart(rtx) => {
+        Command::Restart(_, rtx) => {
             record_admin(inner, "restart").await;
             let _ = rtx.send(());
             Some(Desired::Running)
+        }
+        Command::RestartAtRoundEnd(_, rtx) => {
+            record_admin(inner, "restart_at_round_end").await;
+            let _ = rtx.send(());
+            Some(Desired::Running)
+        }
+        Command::CancelRestart(rtx) => {
+            let _ = rtx.send(false);
+            None
         }
         Command::ForceRestart(rtx) => {
             record_admin(inner, "force_restart").await;
@@ -677,6 +719,7 @@ async fn run_once(inner: &Arc<Inner>, rx: &mut mpsc::Receiver<Command>) -> RunOu
             pid,
             started_at,
             version: version.clone(),
+            restart_at_round_end: None,
         },
     )
     .await;
@@ -715,6 +758,7 @@ async fn run_once(inner: &Arc<Inner>, rx: &mut mpsc::Receiver<Command>) -> RunOu
                         record_admin(inner, "stop").await;
                         set_state(inner, InternalState::Stopping).await;
                         graceful_or_kill(inner, &mut wait, &kill, "Stop requested by operator").await;
+                        set_state(inner, InternalState::Stopped).await;
                         let _ = rtx.send(());
                         return RunOutcome::StoppedByCommand;
                     }
@@ -723,15 +767,34 @@ async fn run_once(inner: &Arc<Inner>, rx: &mut mpsc::Receiver<Command>) -> RunOu
                         set_state(inner, InternalState::Stopping).await;
                         kill.cancel();
                         let _ = (&mut wait).await;
+                        set_state(inner, InternalState::Stopped).await;
                         let _ = rtx.send(());
                         return RunOutcome::StoppedByCommand;
                     }
-                    Command::Restart(rtx) => {
+                    Command::Restart(reason, rtx) => {
                         record_admin(inner, "restart").await;
                         set_state(inner, InternalState::Stopping).await;
-                        graceful_or_kill(inner, &mut wait, &kill, "Restart requested by operator").await;
+                        graceful_or_kill(inner, &mut wait, &kill, &reason).await;
                         let _ = rtx.send(());
                         return RunOutcome::Restart;
+                    }
+                    Command::RestartAtRoundEnd(reason, rtx) => {
+                        record_admin(inner, "restart_at_round_end").await;
+                        set_restart_at_round_end(inner, Some(reason)).await;
+                        let restarted = restart_if_round_over(inner, &mut wait, &kill).await;
+                        let _ = rtx.send(());
+                        if restarted {
+                            return RunOutcome::Restart;
+                        }
+                        continue;
+                    }
+                    Command::CancelRestart(rtx) => {
+                        let cancelled = set_restart_at_round_end(inner, None).await.is_some();
+                        if cancelled {
+                            record_admin(inner, "cancel_restart").await;
+                        }
+                        let _ = rtx.send(cancelled);
+                        continue;
                     }
                     Command::ForceRestart(rtx) => {
                         record_admin(inner, "force_restart").await;
@@ -782,6 +845,9 @@ async fn run_once(inner: &Arc<Inner>, rx: &mut mpsc::Receiver<Command>) -> RunOu
                 return RunOutcome::Crashed { uptime, status };
             }
             _ = ticker.tick() => {
+                if restart_if_round_over(inner, &mut wait, &kill).await {
+                    return RunOutcome::Restart;
+                }
                 if timeout_secs == 0 { continue; }
                 let last = *inner.last_ping.lock().await;
                 // give the process a chance to boot before demanding a heartbeat
@@ -809,6 +875,83 @@ async fn run_once(inner: &Arc<Inner>, rx: &mut mpsc::Receiver<Command>) -> RunOu
             }
         }
     }
+}
+
+async fn restart_if_round_over(
+    inner: &Arc<Inner>,
+    wait: &mut std::pin::Pin<&mut tokio::task::JoinHandle<std::io::Result<ExitStatus>>>,
+    kill: &tokio_util::sync::CancellationToken,
+) -> bool {
+    let Some(reason) = pending_restart_at_round_end(inner).await else {
+        return false;
+    };
+    if !round_over(inner).await {
+        return false;
+    }
+    tracing::info!(instance = %inner.key, %reason, "round over; restarting");
+    set_state(inner, InternalState::Stopping).await;
+    graceful_or_kill(inner, wait, kill, &reason).await;
+    true
+}
+
+async fn pending_restart_at_round_end(inner: &Arc<Inner>) -> Option<String> {
+    match &*inner.state.lock().await {
+        InternalState::Running {
+            restart_at_round_end,
+            ..
+        } => restart_at_round_end.clone(),
+        _ => None,
+    }
+}
+
+// returns the request it replaced
+async fn set_restart_at_round_end(inner: &Arc<Inner>, reason: Option<String>) -> Option<String> {
+    match &mut *inner.state.lock().await {
+        InternalState::Running {
+            restart_at_round_end,
+            ..
+        } => std::mem::replace(restart_at_round_end, reason),
+        _ => None,
+    }
+}
+
+async fn round_over(inner: &Arc<Inner>) -> bool {
+    let Some(port) = inner.server().api.port else {
+        return false;
+    };
+    match fetch_game_status(&inner.game_client, port).await {
+        Ok(status) => status.round_over(),
+        Err(e) => {
+            tracing::debug!(instance = %inner.key, error = %e, "/status poll failed");
+            false
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct GameStatus {
+    players: u64,
+    run_level: u64,
+}
+
+impl GameStatus {
+    // run_level 0 is the pre-round lobby
+    fn round_over(&self) -> bool {
+        self.run_level == 0 || self.players == 0
+    }
+}
+
+async fn fetch_game_status(
+    client: &reqwest::Client,
+    port: u16,
+) -> Result<GameStatus, reqwest::Error> {
+    client
+        .get(format!("http://127.0.0.1:{port}/status"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
 }
 
 async fn set_state(inner: &Arc<Inner>, s: InternalState) {
@@ -893,6 +1036,7 @@ fn build_spec(inner: &Arc<Inner>, version: &str) -> InstanceSpec {
         program,
         args,
         env,
+        cpus: cfg.cpus.clone(),
     }
 }
 
@@ -1088,11 +1232,57 @@ fn clone_server_cfg(s: &ServerConfig) -> ServerConfig {
         run_command: s.run_command.clone(),
         arguments: s.arguments.clone(),
         environment: s.environment.clone(),
+        cpus: s.cpus.clone(),
         heartbeat_timeout: s.heartbeat_timeout,
         restart_min_secs: s.restart_min_secs,
         restart_max_secs: s.restart_max_secs,
         healthy_after_secs: s.healthy_after_secs,
         silent: s.silent,
         autostart: s.autostart,
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn round_over_in_lobby_or_when_empty() {
+        let over = |players, run_level| GameStatus { players, run_level }.round_over();
+        assert!(over(30, 0));
+        assert!(over(0, 1));
+        assert!(over(0, 2));
+        assert!(!over(30, 1));
+        assert!(!over(30, 2));
+    }
+
+    #[tokio::test]
+    async fn reads_game_status() {
+        let client = reqwest::Client::new();
+        let in_round = stub_game_server(r#"{"name":"x","players":12,"run_level":1}"#).await;
+        assert!(
+            !fetch_game_status(&client, in_round)
+                .await
+                .unwrap()
+                .round_over()
+        );
+        let lobby = stub_game_server(r#"{"name":"x","players":12,"run_level":0}"#).await;
+        assert!(
+            fetch_game_status(&client, lobby)
+                .await
+                .unwrap()
+                .round_over()
+        );
+        let garbage = stub_game_server("not json").await;
+        assert!(fetch_game_status(&client, garbage).await.is_err());
+    }
+
+    async fn stub_game_server(body: &'static str) -> u16 {
+        let app =
+            axum::Router::new().route("/status", axum::routing::get(move || async move { body }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        port
     }
 }

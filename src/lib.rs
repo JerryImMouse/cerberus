@@ -1,3 +1,7 @@
+// axum's `Response` is a bit large to be used as an `Err` variant
+// I don't care :)
+#![allow(clippy::result_large_err)]
+
 pub mod cli;
 pub mod config;
 
