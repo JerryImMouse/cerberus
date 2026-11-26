@@ -17,6 +17,7 @@ pub struct InstanceSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+    pub cpus: Option<Vec<usize>>,
 }
 
 pub struct InstanceHandle {
