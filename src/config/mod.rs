@@ -52,6 +52,9 @@ fn default_restart_max_secs() -> u64 {
 fn default_healthy_after_secs() -> u64 {
     30
 }
+fn default_autostart() -> bool {
+    true
+}
 
 #[derive(Debug, Deserialize)]
 pub struct DatabaseConfig {
@@ -113,6 +116,9 @@ pub struct ServerConfig {
 
     #[serde(default)]
     pub silent: bool,
+
+    #[serde(default = "default_autostart")]
+    pub autostart: bool,
 }
 
 // CPU_SETSIZE in glibc and musl
@@ -189,6 +195,16 @@ mod test {
     #[test]
     fn config_deserializable() {
         toml::from_str::<WatchdogConfig>(CONFIG_SAMPLE).unwrap();
+    }
+
+    #[test]
+    fn autostart_defaults_to_true() {
+        assert!(server_with("").unwrap().autostart);
+    }
+
+    #[test]
+    fn autostart_can_be_disabled() {
+        assert!(!server_with("autostart = false").unwrap().autostart);
     }
 
     #[test]

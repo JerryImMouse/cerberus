@@ -34,6 +34,7 @@ heartbeat_timeout = 60      # seconds without a ping -> SIGKILL + backoff
 restart_min_secs = 1
 restart_max_secs = 60
 healthy_after_secs = 30     # stay up this long -> backoff resets
+autostart = true            # false -> stays stopped until `cerberus start syndicate`
 
 # Optional overrides.
 # run_command = "bin/Robust.Server"
