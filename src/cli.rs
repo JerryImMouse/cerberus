@@ -53,6 +53,13 @@ pub enum Command {
     },
     Restart {
         target: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        at_round_end: bool,
+    },
+    CancelRestart {
+        target: String,
     },
     ForceRestart {
         target: String,
@@ -138,9 +145,33 @@ impl Cli {
                 let (client, key) = ctx.resolve(&target)?;
                 client.post_ok(&format!("/instances/{key}/stop")).await?
             }
-            Command::Restart { target } => {
+            Command::Restart {
+                target,
+                reason,
+                at_round_end,
+            } => {
                 let (client, key) = ctx.resolve(&target)?;
-                client.post_ok(&format!("/instances/{key}/restart")).await?
+                // a separate route, so an older daemon answers 404 instead of restarting now
+                let route = if at_round_end {
+                    "restart-at-round-end"
+                } else {
+                    "restart"
+                };
+                let body = reason.map(|r| serde_json::json!({ "reason": r }));
+                client
+                    .request(
+                        reqwest::Method::POST,
+                        &format!("/instances/{key}/{route}"),
+                        body,
+                    )
+                    .await?;
+                println!("ok");
+            }
+            Command::CancelRestart { target } => {
+                let (client, key) = ctx.resolve(&target)?;
+                client
+                    .post_ok(&format!("/instances/{key}/cancel-restart"))
+                    .await?
             }
             Command::ForceRestart { target } => {
                 let (client, key) = ctx.resolve(&target)?;

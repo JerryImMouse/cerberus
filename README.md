@@ -90,6 +90,9 @@ Every command takes an instance target, either bare or `daemon/key` when you hav
 cerberus list                     # all instances across all configured daemons
 cerberus status mymain
 cerberus restart mymain           # graceful: POST /shutdown, wait, SIGKILL if it hangs
+cerberus restart mymain --reason "Applying config, back in a minute"
+cerberus restart mymain --at-round-end --reason "Applying config"   # wait for the lobby, then restart
+cerberus cancel-restart mymain    # drop a pending --at-round-end restart
 cerberus force-restart mymain     # SIGKILL now
 cerberus stop mymain              # graceful stop, don't restart
 cerberus update mymain            # checks the manifest; if there is an update, tells the server to shut down when it wants and applies on exit. If no update, does nothing.
@@ -101,6 +104,8 @@ cerberus reload                   # re-read the config file
 ```
 
 `update` does not force-restart. It waits for the round to end on its own. Same as upstream.
+
+`--reason` is what players see when the server shuts down. `restart --at-round-end` polls the game server's `/status` every 5 seconds and restarts it once it is back in the pre-round lobby (`run_level` 0) or has no players, right away if that is already the case. Until then `status` and `list` show the reason under `restart_at_round_end`. The request is dropped if the server stops or restarts for any other reason first. It needs `api.port`.
 
 ## CLI on your laptop, daemon on the server
 
@@ -147,7 +152,9 @@ GET  /instances
 GET  /instances/{key}/status
 POST /instances/{key}/start
 POST /instances/{key}/stop
-POST /instances/{key}/restart
+POST /instances/{key}/restart                   (optional body {"reason": "..."})
+POST /instances/{key}/restart-at-round-end      (optional body {"reason": "..."})
+POST /instances/{key}/cancel-restart            (409 if nothing is pending)
 POST /instances/{key}/force-restart
 POST /instances/{key}/update
 POST /instances/{key}/silence
