@@ -80,7 +80,10 @@ restart_min_secs = 1        # backoff floor
 restart_max_secs = 60       # backoff ceiling
 healthy_after_secs = 30     # up this long, failure counter resets
 silent = false              # true = drop the server's stdout/stderr from logs
+autostart = true            # false = stay stopped until `cerberus start`
 ```
+
+With `autostart = false` the server is not started when the daemon starts. It stays stopped until `cerberus start <key>`, then it is supervised as usual. Handy for sandbox and mapping servers you bring up on demand. An `update` on such a server while it is stopped installs the new build but does not start it.
 
 ## CLI
 
@@ -89,6 +92,7 @@ Every command takes an instance target, either bare or `daemon/key` when you hav
 ```bash
 cerberus list                     # all instances across all configured daemons
 cerberus status mymain
+cerberus start mymain             # start a stopped server
 cerberus restart mymain           # graceful: POST /shutdown, wait, SIGKILL if it hangs
 cerberus force-restart mymain     # SIGKILL now
 cerberus stop mymain              # graceful stop, don't restart

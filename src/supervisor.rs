@@ -341,7 +341,11 @@ enum RunOutcome {
 async fn run(inner: Arc<Inner>, mut rx: mpsc::Receiver<Command>) {
     let key = inner.key.clone();
     tracing::info!(instance = %key, "supervisor started");
-    let mut desired = Desired::Running;
+    let mut desired = if inner.server().autostart {
+        Desired::Running
+    } else {
+        Desired::Stopped
+    };
     let mut failures: u32 = 0;
 
     loop {
@@ -482,11 +486,15 @@ async fn apply_command_while_stopped(inner: &Arc<Inner>, cmd: Command) -> Option
         Command::Update(rtx) => {
             record_admin(inner, "update").await;
             let outcome = handle_update_stopped(inner).await;
-            let go_running = matches!(outcome, UpdateOutcome::Applied);
+            let applied = matches!(outcome, UpdateOutcome::Applied);
             let _ = rtx.send(outcome);
-            if go_running {
+            if !applied {
+                None
+            } else if inner.server().autostart {
                 Some(Desired::Running)
             } else {
+                // an on-demand server must not be brought up by a CDN update notification
+                set_state(inner, InternalState::Stopped).await;
                 None
             }
         }
@@ -1085,5 +1093,6 @@ fn clone_server_cfg(s: &ServerConfig) -> ServerConfig {
         restart_max_secs: s.restart_max_secs,
         healthy_after_secs: s.healthy_after_secs,
         silent: s.silent,
+        autostart: s.autostart,
     }
 }
